@@ -1,0 +1,599 @@
+---
+title: "QVD23_Rskript_no6_SimpleTimeseriesForecasting"
+author: "Krishnamoorthy Juttoo Chandrasekaran"
+date: "2023-11-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# TOPIC #1: Exploration of time series
+
+Today we are going to do some very basic forecasting from time series to see how the variable might develop.
+At the beginning of every forecasting project, you should look at the respective time series (i.e. plot them) and explore them for trends and seasonalities.
+
+To do this, we load two packages that are often used for time series analyses and forecasting:
+
+```{r}
+
+library(forecast)
+library(tsutils)
+
+```
+
+Now let's load the two datasets we will be working with today:
+
+* AirPassengers: a sample dataset of monthly airline passengers between 1949 and 1960 contained in R
+* Walmart sales: Quarterly sales figures from Walmart over several years (2003 to 2015)
+
+```{r}
+# Load first data set (implemented)
+data(AirPassengers)
+airdata <- AirPassengers
+# Load second dataset
+walmdata <- ts(read.csv("./WalmartQ.csv"),frequency=4,start=c(2003,1))
+
+```
+
+What is new is that we load the 2nd data set with the ts() function. This means that we tell R that it is a time series. In addition, we tell R in which intervals the time series was measured (here 4, because quarters), and when (in which year and which quarter) the time series begins.
+
+Now let's take a look at the data:
+```{r}
+plot(airdata,xlab="Time", ylab = "1000 Air Passengers",main="Air Passenger numbers - 1949 to 1961")
+
+```
+We see rising passenger numbers (positive trend) and presumably seasonality (the same months always have higher or lower passenger numbers). In addition, the seasonality appears to be multiplicative, i.e. the swings also increase as the trend rises (they are a multiple of the respective level).
+
+
+Let's just take a look at Walmart sales:
+```{r}
+
+plot(walmdata[,1],xlab="Time", ylab = "Quarterly Sales in Million$", main="Walmart Sales - 1949 to 1961")
+
+```
+Here, too, we see an increasing trend, but not as linear as for air passengers. Here, too, we see a possible seasonality, and this appears to be very regular and therefore additive (it is simply added to/subtracted from the respective level).
+
+
+Now let's try to display the trend. To do this, we usually try to calculate a so-called "centred moving average", i.e. a moving average over the same number of past and future data points, with the current data point in the middle. The total range of the moving average corresponds to the intervals (frequency) of the time series. This is done automatically by the cmav() function: 
+
+```{r}
+cmav(airdata, outplot=TRUE)
+
+
+```
+And now we visualise the remaining (de-trended) values (i.e. the residuals after deducting the trend) in a seasonality plot:
+
+
+```{r}
+seasplot(airdata)
+
+
+```
+That actually looks very regular.
+
+How is it with the Walmart sales?
+
+
+```{r}
+cmav(walmdata[,1], outplot=TRUE)
+
+seasplot(walmdata[,1])
+```
+Also very regular. Only the trend is not quite as linear. Perhaps this will cause difficulties with the forecasts later on?
+
+
+# TOPIC 2: Prediction models with the linear model and deterministic seasonality
+
+Let's continue with the Walmart data for now.
+
+Since we want to make correct predictions, we split the data into a training set and a test set (the last 2 years of the time series):
+
+```{r}
+walm.train <- window(walmdata[,1],end=c(2013,4))
+walm.test <- window(walmdata[,1],start=c(2014,1))
+```
+
+Now we make life easy for ourselves and use the prediction with the linear model from the forecast package::
+
+```{r}
+
+#Construction of a linear time series model with trend and seasonality dummies (deterministic seasonality)
+easy.model <- tslm( walm.train~ trend + season )
+summary(easy.model)
+#we can see the trend is going up significantly
+```
+Aha! The tslm() , i.e. the time-series linear model, automatically has a time trend as a continuous variable, as well as three dummies for quarters 2, 3, and 4 built in. We already know this from past R tasks :)
+
+We see a significant trend, and that quarter 2 (Easter?) and 4 (Christmas!) bring higher sales.
+
+Let's plot the predicted values and the prediction errors:
+
+```{r}
+
+frc.easy <- forecast(easy.model, h=8) 
+plot(frc.easy) #Plot of the forecast with the 8 missing quarters and prediction errors
+
+
+```
+That looks pretty good! The blue line describes the predicted values, the dark grey area around it is the 80% prediction interval, and the light grey area around it is the 95% prediction interval.
+
+The only thing missing are the actual values from the test set:
+
+```{r}
+
+frc.easy <- forecast(easy.model, h=8)
+plot(frc.easy) #Plot of the forecast with the 8 missing quarters and prediction errors
+lines(walm.test,lty=6,lwd=2)  # Plot of actual quarterly values from the test set
+legend("bottomright",c("Forecast","actual"),col=c("blue","black"),lty=1)
+
+```
+
+OK, it wasn't quite that good after all. Our forecast is far too high. Not even the forecast error interval contains the true values.
+
+
+# TOPIC 3: Prediction models with the linear model and stochastic seasonality
+
+Now let's try an alternative linear prediction model. To do this, we look at whether there is sufficient autocorrelation in the time series. If so, then we can try to capture and model the seasonality with a skilful choice of lags (i.e. values further back in the time series).
+
+To do this, we look at the partial autocorrelation. This is the autocorrelation of each lag after the autocorrelation of the previous lags has already been removed. We do this with the function `pacf()`.
+
+
+```{r}
+pacf(walm.train)
+```
+The x-axis may be displayed incorrectly. Then simply note the vertical lines. These are the possibly relevant lags of the time series that carry significant partial autocorrelation. We can see that lag 1, lag 2, lag 4 and lag 5 could possibly be relevant (the bar goes beyond the confidence interval in each case).
+
+So let's try to build a model from lags.
+
+Let's first build a data set with lags 1-5:
+
+```{r}
+#first an empty data set full of NAs, which we then fill::
+walm.train.lags <- array(NA,c(length(walm.train),6)) 
+
+# We start a loop over 6 values (1 variable + 5 lags): i = 1, 2, 3, 4, 5, 6
+for (i in 1:6){     
+   # We write in column i and start at value 1 until the end at the length of the time series - i + 1:
+  walm.train.lags[i:length(walm.train), i] <- walm. train[1:(length(walm.train)-i+1)] 
+}
+
+
+# We name the columns and make a data.frame out of them
+colnames(walm.train.lags) <- c("sales",paste0("lag",1:5))  
+walm.train.lags <-as.data.frame(walm.train.lags)#  ts(as.data.frame(walm.train.lags),frequency=4,start=c(2003,1))# 
+
+# Let's take a look at our work (at least the first 10 lines):
+walm.train.lags[1:10,]
+
+
+```
+This is the training data set with 5 lags. Due to the 5 lags, we naturally lose the first 5 rows, as not all variables have a value here (we don't know what happened before the first value).
+
+
+Now we need a test data set with 5 lags. At least we know the previous values.
+
+
+```{r}
+#first an empty data set full of NAs, which we then fill:.:
+walm.test.lags <- array(NA,c(length(walm.test),6)) 
+
+# We start a loop over 6 values (1 variable + 5 lags): i = 1, 2, 3, 4, 5, 6
+for (i in 1:6){    
+  # We write in column i and start at value 1 until the end at the length of the test time series :
+  walm.test.lags[1:length(walm.test), i] <- walmdata[(length(walm.train)+2-i):(length(walm.train)+length(walm.test)-i+1),1] 
+}
+
+
+# We name the columns and make a data.frame out of them
+colnames(walm.test.lags) <- c("sales",paste0("lag",1:5))  
+walm.test.lags <-as.data.frame(walm.test.lags)
+
+# Let's take a look at our work (all 8 lines):
+walm.test.lags[1:8,]
+
+
+```
+
+Now let's estimate the possible model with lags 1, 2, 4 and 5 (see pacf function)
+
+
+```{r}
+# The complete model
+fit1 <- lm(sales~ lag1+lag2+lag4+lag5,data=walm.train.lags)  
+summary(fit1)
+
+
+```
+Lag 2 is not significant, but lag 1, 4 and 5 actually are. Is it bad if we simply remove lag 2? Let's try it out:
+
+```{r}
+
+
+fit2 <- lm(sales~ lag1+lag4+lag5,data=walm.train.lags)  
+summary(fit2)
+
+
+```
+No, it makes hardly any difference to the fit (R-squared), so let's try our luck with this model:
+
+
+```{r}
+#Prediction of the model on the test data set
+frc <- forecast(fit2, h=8, newdata=walm.test.lags)
+#Make a time series from the predicted values again
+frc.values <- ts(frc$mean,frequency=frequency(walm.test),start=start(walm.test))
+
+#Limits of the 95% prediction interval
+up <- ts(frc$upper[,2],frequency=frequency(walm.test),start=start(walm.test))
+low <- ts(frc$lower[,2],frequency=frequency(walm.test),start=start(walm.test))
+
+#Plot the time series, the prediction and the prediction interval, and the true values
+ts.plot(walm.train,walm.test,frc.values,col=c("black","black","red"))
+lines(up,col="pink", lty=2)
+lines(low,col="pink", lty=2)
+
+
+```
+
+That looks pretty good this time! Let's add the model with the seasonality dummies: 
+
+```{r}
+
+ts.plot(walm.train,walm.test,frc.values,col=c("black","black","red"))
+lines(frc.easy$mean,col="blue")
+legend("bottomright",c("Forecast with dummies","Forecast with lags","actual"),col=c("blue","red","black"),lty=1)
+```
+Well, that looks really good.
+That should be it for today. 
+Now comes your bonus task.
+
+Can you produce a similarly good forecast for the last 2 years of the Airlinepassenger data set?
+
+ * Take the airdata dataset
+ * Create a training and a test dataset (the last 2 years)
+ * Try to find a good linear prediction model
+ * Do you need a model with dummies or with lags?
+ * Plot the time series, the prediction, and the real values of the test data set
+
+```{r}
+#if it is given 2 years u need to take h=24
+
+
+```
+
+
+
+
+
+
+
+
+
+```{r}
+library(forecast)
+omnidata <- read.csv("./Omnichannel_Timeseries.csv")
+# Assuming 'omnidata' is your CSV data read into a data frame
+omnidata_ts <- ts(as.matrix(Omnichannel.data[, ncol(omnidata)]), frequency = 4, start = c(2010, 1))
+
+# Determine the number of observations
+num_observations <- length(omnidata_ts)
+
+# Specify the number of observations to be included in the test set
+num_test_observations <- 50
+
+# Create a time variable
+time <- 1:num_observations
+
+# Use indexing to extract training and test sets
+omni.train <- omnidata_ts[1:(num_observations - num_test_observations)]
+omni.test <- omnidata_ts[(num_observations - num_test_observations + 1):num_observations]
+
+# Create a time series object
+omni.train_ts <- ts(omni.train, frequency = 4, start = c(2010, 1))
+
+if (any(is.na(omni.train_ts))) {
+  # Remove missing values
+  omni.train_ts <- na.omit(omni.train_ts)
+}
+
+# Fit a time series linear model with a seasonal component
+model <- tslm(omni.train_ts ~ trend + season)
+
+# Print the summary of the model
+summary(model)
+frc.peasy <- forecast(model, h=8)
+plot(frc.peasy)
+
+#Plot of the forecast with the 8 missing quarters and prediction errors
+lines(omni.test,lty=6,lwd=2)  # Plot of actual quarterly values from the test set
+legend("bottomright",c("Forecast","actual"),col=c("blue","black"),lty=1)
+multivar1.data <- as.data.frame(cbind(1:250, Omnichannel.data[,c("Sales.mobile","Marketing","Sales.web","Sales.store")]))
+names(multivar1.data) <- c("time","Sales.mobile","Marketing","Sales.web","Sales.store")
+rho_E <- EmbedDimension(dataFrame = multivar1.data, #Simplex-EDM using out data
+                       lib = "1 200",             #as before
+                       pred = "201 250",          
+                       columns = "Marketing Sales.web Sales.store Sales.mobile", 
+                       target = "Sales.mobile",                   
+                       maxE=25)                   #we try up to 25 lagging dimensions
+```
+All right, E = 20 seems to give the prediction a good boost. On the other hand, we miss 20! lags. Here, too, it is important to weigh up: as few lags as possible with optimal predictions (Elbow...).
+
+
+
+```{r}
+simplex_out3 <- Simplex(dataFrame = multivar1.data, 
+                       lib = "1 200",             
+                       pred = "201 250",          
+                       columns = "Marketing Sales.web Sales.store Sales.mobile", 
+                       target = "Sales.mobile",                                     
+                       E=20)     
+simplex_out3[c(1:5, 50:52), ]
+plot(simplex_out3$Observations,simplex_out3$Predictions)
+
+plot(simplex_out3$time,simplex_out3$Observations,type="l")
+lines(simplex_out3$time,simplex_out3$Predictions,type="l", col="red")
+legend("bottomright",c("prediction","actual"),col=c("red","black"),lty=1)
+#using embedding dimension of 20                   #we try up to 25 lagging dimensions
+ComputeError(simplex_out3$Observations,simplex_out3$Predictions)
+myplot1<-last_plot()
+```
+All right, E = 20 seems to give the prediction a good boost. On the other hand, we miss 20! lags. Here, too, it is important to weigh up: as few lags as possible with optimal predictions (Elbow...).
+
+
+
+```{r}
+simplex_out2 <- Simplex(dataFrame = Omnichannel.data, 
+                       lib = "1 200",             
+                       pred = "201 250",          
+                       columns = "Visits.store Visits.web Visits.mobile Marketing", 
+                       target = "Sales.mobile",                                     
+                       E=20)                                 #using embedding dimension of 20
+```
+
+
+# TOPIC 4: Predictions from past states of dynamic systems -> Simplex EDM
+
+To finish this R exercise, we would like to look at a current, still relatively new method for analysing time series data from complex systems. It is about "Empirical Dynamic Models" (EDM). This is a whole class of time series methods, but today we are only focussing on the simplex method. EDM are a machine learning method (i.e. with training and test data, and prediction measures). Unlike other machine learning methods, however, EDM have an interesting mathematical substructure, and you can understand what happens "under the bonnet" in the model.
+
+Enough preamble, let's get started.
+We need a package for this: rEDM. If you don't have it yet, you can install it with the following code:
+
+```{r}
+
+if(!require(rEDM)){install.packages("rEDM")};library("rEDM") 
+ #load/install the rEDM package when not installed
+```
+
+And some new data: 
+
+These are daily time series from an actual omnichannel retailer for clothing.
+We have time series for:
+
+ * Marketing: Marketing spend as a percentage of a respective budget unknown to us
+ * Visits.store: visitors to the shop
+ * Visits.web: Visitors to the webshop
+ * Visits.mobile: Visitors to the mobile app
+ * Sales.store: Transactions in the retail shop
+ * Sales.web: Transactions in the webshop
+ * Sales.mobile: Transactions in the mobile app
+
+
+```{r}
+Omnichannel.data <- read.csv("Omnichannel_Timeseries.csv", header=TRUE, sep=";",  dec=".")
+
+```
+
+Let's take a look at a few time series:
+
+
+```{r}
+
+
+plot(Omnichannel.data$Marketing, type="l", xlab="t", main="Marketing time series", sub="in % eines Budgets")
+
+plot(Omnichannel.data$Visits.store, type="l", xlab="t", main="Store visits time series", sub="Tägliche Besuche im Ladengeschäft")
+
+plot(Omnichannel.data$Visits.web, type="l", xlab="t", main="Webshop visits time series", sub="Tägliche Besuche im Webshop")
+
+
+```
+
+We would perhaps like to predict the visits to our shop. We can probably do this with past visits, as we have done in the past. But surely there is also valuable predictive information hidden in the marketing spend and visits from other sales channels?
+
+In EDM, we can make multivariate predictions. The model searches for similar states in the past, looks at how the system developed back then and calculates a prediction for today.
+A system state is a point or vector of all variables considered. A similar system state is a close point from the past (we are already familiar with the proximity between points or Euclidean distances from cluster analysis). The more similar (i.e. closer) a past point is, the greater its weighting in the calculation.
+We always need (at least) one more point for the prediction than we have variables/dimensions/coordinates in the point (i.e. a simplex around the point to be predicted).
+
+Let's try a prediction of shop visits from points consisting of purchases in all three channels and marketing spend:
+
+```{r}
+# the data set with our dimensions/coordinates. Important: the first column must be "time"...
+multivar.data <- as.data.frame(cbind(1:250, Omnichannel.data[,c("Visits.store","Visits.web","Visits.mobile","Marketing")]))
+names(multivar.data) <- c("time","Visits.store","Visits.web","Visits.mobile","Marketing")
+
+
+simplex_out <- Simplex(dataFrame = multivar.data, #Simplex-EDM using our data
+                       lib = "1 200",             #With the training set from day1 to day200
+                       pred = "201 250",          #With the test set from day 201 to day 250
+                       columns = "Visits.store Visits.web Visits.mobile Marketing", #With these variables...
+                       target = "Visits.store",                                     #...we predict this variable
+                       E=1)                                  # we do not yet use lags when predicting
+
+#Let's take a look at the predictions (the first 3 and the last 3)
+simplex_out[c(1:3, 48:52), ]
+
+```
+Is that good?
+We could plot the predicted values and the real values:
+
+```{r}
+plot(simplex_out$Observations,simplex_out$Predictions)
+
+plot(simplex_out$time,simplex_out$Observations,type="l")
+lines(simplex_out$time,simplex_out$Predictions,type="l", col="red")
+legend("bottomright",c("prediction","actual"),col=c("red","black"),lty=1)
+
+```
+
+That doesn't even look so good. Let's take a look at error measures:
+
+ * MAE : mean absolute error (the sum of the absolute deviations between prediction and true value; small is good)
+ * rho : correlation (the correlation between prediction and true value; close to 1 would be great)
+ * RMSE : root mean squared error (the root of the squared deviations between prediction and true value; small would be good)
+
+```{r}
+ComputeError(simplex_out$Observations,simplex_out$Predictions)
+```
+
+Well.
+
+But we haven't built an embedding with lags of the variables yet. Let's try it:
+
+
+```{r}
+rho_E <- EmbedDimension(dataFrame = multivar.data, #Simplex-EDM using out data
+                       lib = "1 200",             #as before
+                       pred = "201 250",          
+                       columns = "Visits.store Visits.web Visits.mobile Marketing", 
+                       target = "Visits.store",                   
+                       maxE=25)    #setting max of lags 25               #we try up to 25 lagging dimensions
+```
+All right, E = 20 seems to give the prediction a good boost. On the other hand, we miss 20! lags. Here, too, it is important to weigh up: as few lags as possible with optimal predictions (Elbow...).
+
+
+
+```{r}
+simplex_out2 <- Simplex(dataFrame = multivar.data, 
+                       lib = "1 200",             
+                       pred = "201 250",          
+                       columns = "Visits.store Visits.web Visits.mobile Marketing", 
+                       target = "Visits.store",                                     
+                       E=20)                                 #using embedding dimension of 20
+
+
+simplex_out2[c(1:3, 48:52), ]
+
+#plots:
+plot(simplex_out2$Observations,simplex_out2$Predictions)
+
+plot(simplex_out2$time,simplex_out2$Observations,type="l")
+lines(simplex_out2$time,simplex_out2$Predictions,type="l", col="red")
+legend("bottomright",c("prediction","actual"),col=c("red","black"),lty=1)
+
+# what about errors?
+ComputeError(simplex_out2$Observations,simplex_out2$Predictions)
+```
+That looks much better. And a correlation of 0.8 between predicted and actual values is quite something. 
+
+Would a model with 8 or 13 lags be enough? Try it out. All you have to do is change the value for E (Embedding Dimension):
+
+```{r}
+#Platz für Ihren Code
+simplex_out3 <- Simplex(dataFrame = multivar.data, 
+                       lib = "1 200",             
+                       pred = "201 250",          
+                       columns = "Visits.store Visits.web Visits.mobile Marketing", 
+                       target = "Visits.store",                                     
+                       E=13)                                 #using embedding dimension of 20
+
+
+simplex_out3[c(1:3, 48:52), ]
+
+#plots:
+plot(simplex_out2$Observations,simplex_out2$Predictions)
+
+plot(simplex_out2$time,simplex_out2$Observations,type="l")
+lines(simplex_out2$time,simplex_out2$Predictions,type="l", col="red")
+legend("bottomright",c("prediction","actual"),col=c("red","black"),lty=1)
+
+# what about errors?
+ComputeError(simplex_out2$Observations,simplex_out2$Predictions)
+```
+
+
+# TOPIC 5: univariate Simplex
+
+The really cool thing about EDM is that there is a topological mathematical substructure that allows us to predict individual time series with only their lags very well even from this complex system. Let's give it a try:
+
+```{r}
+
+rho_E2 <- EmbedDimension(dataFrame = multivar.data, #Simplex-EDM aus unserem Datensatz
+                       lib = "1 200",            
+                       pred = "201 250",          
+                       columns = "Visits.store", #Wir nehmen nur noch Visits
+                       target = "Visits.store",                   #...und sagen Visits vorher
+                       maxE=25)
+#embeddimension does the same
+
+```
+
+Let's try out the Simplex:
+
+
+```{r}
+simplex_out3 <- Simplex(dataFrame = multivar.data, #Simplex-EDM aus unserem Datensatz
+                       lib = "1 200",             
+                       pred = "201 250",          
+                       columns = "Visits.store", #Mit diesen Variablen...
+                       target = "Visits.store",   #...sagen wir diese vorher
+                       E=20)                                 
+
+#schauen wir uns die Vorhersagen ein wenig an (die ersten 3 und die letzten 3)
+simplex_out3[c(1:3, 48:52), ]
+
+#oder als Plots:
+plot(simplex_out3$Observations,simplex_out3$Predictions)
+
+plot(simplex_out3$time,simplex_out3$Observations,type="l")
+lines(simplex_out3$time,simplex_out3$Predictions,type="l", col="red")
+legend("bottomright",c("prediction","actual"),col=c("red","black"),lty=1)
+
+# wie sieht es mit den Fehlern aus?
+ComputeError(simplex_out3$Observations,simplex_out3$Predictions)
+```
+That's not much worse than the multivariate prediction. Super.
+
+However, it is important to remember that when we use EDM, we must believe that we are modelling or predicting dynamic systems. Such systems can NEVER be predicted infinitely far into the future (due to chaos). At some point, there is ALWAYS a drastic drop in prediction quality. Sometimes even very suddenly. 
+Let's forecast not one day in advance, but 1, 2, ... to every 49 days in the test set:
+
+```{r}
+rho_Tp <- PredictInterval(dataFrame = multivar.data, 
+                          lib = "1 200", 
+                          pred = "201 250", 
+                          target = "Visits.store",
+                          columns = "Visits.store", 
+                          E = 20,
+                          maxTp = 49)
+#using more lags gives more data loss hence setting it to maxtp=49
+```
+Everything goes well until about 39 days, then suddenly it doesn't. This is to be expected.
+
+
+# TOPIC 6: Multiview Embeddings
+
+Now we have a super comprehensive model with 20 lags of all variables, and a quite simple one with lags of the target variable only. Wouldn't combinations of individual lags of different variables be better?
+
+You can try this out with Multiview. It tests all combinations for a model with a defined embedding dimension.
+
+Let's try to find the best model with only 4 dimensions. So as an alternative to our very first model with 4 variables. This takes a while because all combinations are tested. So be patient.
+
+
+```{r}
+Mview = Multiview(dataFrame = multivar.data, 
+                  lib = "1 200", 
+                  pred = "101 250", 
+                  E = 4,
+                  columns = "Visits.store Visits.web Visits.mobile Marketing", 
+                  target = "Visits.store")
+
+#welches ist die beste Kombination?
+best.combination <- (Mview$View[which.max(Mview$View$rho), ])
+print(best.combination)
+
+```
+
+Aha, so there seems to be a model that is better than our first one. Store visits are predicted from past store visits (2 and 3 days ago), as well as current and yesterday's web visits.
+
+
